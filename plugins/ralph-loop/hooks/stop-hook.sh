@@ -4,7 +4,13 @@
 # Prevents session exit when a ralph-loop is active
 # Feeds Claude's output back as input to continue the loop
 
-set -euo pipefail
+# NOTE: Removed set -e to prevent silent failures
+set -uo pipefail
+
+# Debug log function (writes to stderr so it's visible)
+debug_log() {
+  echo "[ralph-loop-debug] $1" >&2
+}
 
 # Read hook input from stdin (advanced stop hook API)
 HOOK_INPUT=$(cat)
@@ -12,17 +18,24 @@ HOOK_INPUT=$(cat)
 # Check if ralph-loop is active
 RALPH_STATE_FILE=".claude/ralph-loop.local.md"
 
+debug_log "Checking for state file: $RALPH_STATE_FILE"
+
 if [[ ! -f "$RALPH_STATE_FILE" ]]; then
+  debug_log "No state file found - allowing exit"
   # No active loop - allow exit
   exit 0
 fi
 
+debug_log "State file found, parsing frontmatter..."
+
 # Parse markdown frontmatter (YAML between ---) and extract values
-FRONTMATTER=$(sed -n '/^---$/,/^---$/{ /^---$/d; p; }' "$RALPH_STATE_FILE")
-ITERATION=$(echo "$FRONTMATTER" | grep '^iteration:' | sed 's/iteration: *//')
-MAX_ITERATIONS=$(echo "$FRONTMATTER" | grep '^max_iterations:' | sed 's/max_iterations: *//')
+FRONTMATTER=$(sed -n '/^---$/,/^---$/{ /^---$/d; p; }' "$RALPH_STATE_FILE") || true
+ITERATION=$(echo "$FRONTMATTER" | grep '^iteration:' | sed 's/iteration: *//' || echo "")
+MAX_ITERATIONS=$(echo "$FRONTMATTER" | grep '^max_iterations:' | sed 's/max_iterations: *//' || echo "")
 # Extract completion_promise and strip surrounding quotes if present
-COMPLETION_PROMISE=$(echo "$FRONTMATTER" | grep '^completion_promise:' | sed 's/completion_promise: *//' | sed 's/^"\(.*\)"$/\1/')
+COMPLETION_PROMISE=$(echo "$FRONTMATTER" | grep '^completion_promise:' | sed 's/completion_promise: *//' | sed 's/^"\(.*\)"$/\1/' || echo "null")
+
+debug_log "Parsed: iteration=$ITERATION, max=$MAX_ITERATIONS, promise=$COMPLETION_PROMISE"
 
 # Validate numeric fields before arithmetic operations
 if [[ ! "$ITERATION" =~ ^[0-9]+$ ]]; then
@@ -163,11 +176,14 @@ else
 fi
 
 # Output JSON to block the stop and feed prompt back
+# CRITICAL: "continue": false takes precedence over everything per Claude Code docs
 # The "reason" field contains the prompt that will be sent back to Claude
+debug_log "Outputting block response for iteration $NEXT_ITERATION"
 jq -n \
   --arg prompt "$PROMPT_TEXT" \
   --arg msg "$SYSTEM_MSG" \
   '{
+    "continue": false,
     "decision": "block",
     "reason": $prompt,
     "systemMessage": $msg
